@@ -1,0 +1,9 @@
+group_id,major,minor
+convenience_store,食品餐饮,便利店
+supermarket,食品餐饮,食材采购
+restaurant_fast,食品餐饮,日常正餐
+restaurant_dining,休闲娱乐,外出吃饭
+clothing_store,购物消费,服饰鞋包
+transport_train,出行交通,公共交通
+subscription,居家生活,App会员
+entertainment_movie,休闲娱乐,电影娱乐
