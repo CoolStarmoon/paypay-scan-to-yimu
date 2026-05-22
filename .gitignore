@@ -9,6 +9,7 @@ local.properties
 *.jpg
 *.jpeg
 *.png
+!app/src/main/res/drawable/paypay_logo.png
 *.jks
 *.keystore
 .idea/

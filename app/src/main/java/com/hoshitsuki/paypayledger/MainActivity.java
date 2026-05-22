@@ -1,34 +1,30 @@
 package com.hoshitsuki.paypayledger;
 
-import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
-import android.content.ContentResolver;
-import android.content.ContentValues;
 import android.content.DialogInterface;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
-import android.provider.MediaStore;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.core.content.FileProvider;
 
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.Text;
@@ -48,6 +44,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -63,11 +60,13 @@ import jxl.write.WritableWorkbook;
 
 public class MainActivity extends Activity {
     private static final int REQUEST_IMAGES = 41;
-    private static final int REQUEST_WRITE_BILLS = 42;
-    private static final int REQUEST_IMPORT_MAPPING = 43;
-    private static final int REQUEST_IMPORT_OVERRIDES = 44;
-    private static final int REQUEST_IMPORT_GROUPS = 45;
-    private static final int REQUEST_WRITE_CONFIG = 46;
+    private static final int REQUEST_SAVE_BILLS = 42;
+    private static final int REQUEST_IMPORT_CONFIG = 43;
+    private static final int REQUEST_SAVE_CONFIG = 44;
+    private static final int REQUEST_IMPORT_RULE_GROUPS = 45;
+    private static final int REQUEST_SAVE_RULE_GROUPS = 46;
+    private static final String MIME_EXCEL = "application/vnd.ms-excel";
+    private static final String MIME_CSV = "text/csv";
 
     private final int paper = Color.rgb(244, 241, 236);
     private final int card = Color.rgb(253, 251, 247);
@@ -89,6 +88,10 @@ public class MainActivity extends Activity {
     private Button importButton;
     private Button exportButton;
     private int processedCount = 0;
+    private byte[] pendingCustomWorkbook;
+    private String pendingCustomWorkbookName;
+    private byte[] pendingCsvExport;
+    private String currentScreen = "home";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -97,12 +100,15 @@ public class MainActivity extends Activity {
         recognizer = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
         buildUi();
         if (!rules.hasUserMappings()) {
-            statusText.setText("请先确认你的账本分类映射。");
-            showCategoryRulesDialog(false);
+            statusText.setText("还没有设置分类规则，可从商户合集进入设置。");
+            showMissingMappingPrompt();
+        } else if (rules.consumeMigrationNotice()) {
+            showMappingMigrationNotice();
         }
     }
 
     private void buildUi() {
+        currentScreen = "home";
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
         scrollView.setBackgroundColor(paper);
@@ -124,10 +130,13 @@ public class MainActivity extends Activity {
         hero.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(hero, matchWrap());
 
-        TextView mark = text("PAY", 20, Color.WHITE, true);
-        mark.setGravity(Gravity.CENTER);
-        mark.setBackground(round(sage, dp(20), 0));
-        hero.addView(mark, new LinearLayout.LayoutParams(dp(82), dp(82)));
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.paypay_logo);
+        logo.setAdjustViewBounds(true);
+        logo.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        logo.setBackground(round(Color.WHITE, dp(20), 0));
+        logo.setPadding(dp(8), dp(8), dp(8), dp(8));
+        hero.addView(logo, new LinearLayout.LayoutParams(dp(82), dp(82)));
 
         TextView heroTitle = text("导入截图", 24, ink, true);
         heroTitle.setGravity(Gravity.CENTER);
@@ -163,6 +172,12 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams groupLp = new LinearLayout.LayoutParams(0, dp(92), 1);
         groupLp.setMargins(dp(12), 0, 0, 0);
         stats.addView(groupText, groupLp);
+        groupText.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                showCategoryRulesPage();
+            }
+        });
 
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
@@ -176,51 +191,14 @@ public class MainActivity extends Activity {
         statusText.setPadding(0, dp(12), 0, dp(16));
         root.addView(statusText);
 
-        exportButton = actionButton("重新导出表格", sand, ink, 16);
+        exportButton = actionButton("自定义导出表格", sand, ink, 16);
         exportButton.setEnabled(false);
         root.addView(exportButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
         exportButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                exportBills();
-            }
-        });
-
-        TextView settingsTitle = text("分类规则", 20, ink, true);
-        settingsTitle.setPadding(0, dp(22), 0, dp(10));
-        root.addView(settingsTitle);
-
-        LinearLayout settings = panel(dp(14));
-        root.addView(settings, matchWrap());
-        addSettingsButton(settings, "分类规则设置", new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                showCategoryRulesDialog(true);
-            }
-        });
-        addSettingsButton(settings, "导出分类配置", new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                exportConfig();
-            }
-        });
-        addSettingsButton(settings, "导入 category_mapping.csv", new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                openCsvPicker(REQUEST_IMPORT_MAPPING);
-            }
-        });
-        addSettingsButton(settings, "导入 merchant_override.csv", new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                openCsvPicker(REQUEST_IMPORT_OVERRIDES);
-            }
-        });
-        addSettingsButton(settings, "导入 rule_groups.csv", new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                openCsvPicker(REQUEST_IMPORT_GROUPS);
+                startCustomExport();
             }
         });
 
@@ -243,6 +221,224 @@ public class MainActivity extends Activity {
         lp.setMargins(0, parent.getChildCount() == 0 ? 0 : dp(8), 0, 0);
         parent.addView(button, lp);
         button.setOnClickListener(listener);
+    }
+
+    private void showMissingMappingPrompt() {
+        new AlertDialog.Builder(this)
+                .setTitle("还没有设置分类规则")
+                .setMessage("可以从首页的“商户合集”进入分类规则设置。现在不设置也可以先导入截图，App 会先使用推荐映射。")
+                .setPositiveButton("去设置", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int i) {
+                        showCategoryRulesPage();
+                    }
+                })
+                .setNegativeButton("稍后", null)
+                .show();
+    }
+
+    private void showMappingMigrationNotice() {
+        new AlertDialog.Builder(this)
+                .setTitle("分类规则已兼容迁移")
+                .setMessage("旧版“快餐”和“正餐”已经合并为“餐饮”。如果原来两项分类不同，已保留最后一条映射，你可以在分类规则设置中调整。")
+                .setPositiveButton("去设置", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int i) {
+                        showCategoryRulesPage();
+                    }
+                })
+                .setNegativeButton("知道了", null)
+                .show();
+    }
+
+    private LinearLayout pageRoot(String title, boolean showMenu) {
+        ScrollView scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
+        scrollView.setBackgroundColor(paper);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(18), dp(18), dp(18), dp(26));
+        scrollView.addView(root, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(top, matchWrap());
+
+        Button back = actionButton("‹", card, ink, 28);
+        top.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                navigateBack();
+            }
+        });
+
+        TextView titleView = text(title, 22, ink, true);
+        titleView.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0, dp(48), 1);
+        titleLp.setMargins(dp(8), 0, dp(8), 0);
+        top.addView(titleView, titleLp);
+
+        if (showMenu) {
+            Button menu = actionButton("⋮", card, ink, 24);
+            top.addView(menu, new LinearLayout.LayoutParams(dp(48), dp(48)));
+            menu.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    showCategoryMenu();
+                }
+            });
+        } else {
+            View spacer = new View(this);
+            top.addView(spacer, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        }
+
+        setContentView(scrollView);
+        return root;
+    }
+
+    private void showCategoryMenu() {
+        final String[] items = new String[]{"查看商户识别规则", "规则导入导出", "管理单个商户修正规则"};
+        new AlertDialog.Builder(this)
+                .setItems(items, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int which) {
+                        if (which == 0) {
+                            showRuleGroupsPage();
+                        } else if (which == 1) {
+                            showRuleTransferPage();
+                        } else {
+                            showOverridesDialog();
+                        }
+                    }
+                })
+                .show();
+    }
+
+    private void navigateBack() {
+        if ("keywords".equals(currentScreen)) {
+            showRuleGroupsPage();
+        } else if ("rules".equals(currentScreen) || "transfer".equals(currentScreen)) {
+            showCategoryRulesPage();
+        } else {
+            buildUi();
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if ("home".equals(currentScreen)) {
+            super.onBackPressed();
+        } else {
+            navigateBack();
+        }
+    }
+
+    private void showRuleTransferPage() {
+        currentScreen = "transfer";
+        LinearLayout root = pageRoot("规则导入导出", false);
+        TextView intro = text("这里导入导出账本分类映射和单个商户修正规则，不包含商户识别关键词。", 14, muted, false);
+        intro.setPadding(0, dp(14), 0, dp(12));
+        root.addView(intro);
+
+        LinearLayout box = panel(dp(14));
+        root.addView(box, matchWrap());
+        addSettingsButton(box, "导出分类配置", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                exportConfig();
+            }
+        });
+        addSettingsButton(box, "导入分类配置", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                openCsvPicker(REQUEST_IMPORT_CONFIG);
+            }
+        });
+    }
+
+    private void showRuleGroupsPage() {
+        currentScreen = "rules";
+        LinearLayout root = pageRoot("商户识别规则", false);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(0, dp(12), 0, dp(12));
+        root.addView(actions, matchWrap());
+        Button export = actionButton("导出关键词规则", sand, ink, 14);
+        Button importButton = actionButton("导入关键词规则", sand, ink, 14);
+        actions.addView(export, new LinearLayout.LayoutParams(0, dp(46), 1));
+        LinearLayout.LayoutParams importLp = new LinearLayout.LayoutParams(0, dp(46), 1);
+        importLp.setMargins(dp(8), 0, 0, 0);
+        actions.addView(importButton, importLp);
+        export.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                exportRuleGroups();
+            }
+        });
+        importButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                openCsvPicker(REQUEST_IMPORT_RULE_GROUPS);
+            }
+        });
+
+        for (final CategoryRuleStore.RuleGroup group : rules.getEffectiveRuleGroups()) {
+            LinearLayout row = panel(dp(14));
+            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rowLp.setMargins(0, 0, 0, dp(8));
+            root.addView(row, rowLp);
+            row.addView(text(group.groupName, 16, ink, true));
+            row.addView(text(group.keywords.size() + " 个关键词" + (group.imported ? "，已自定义" : "，内置规则"), 13, muted, false));
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    showRuleGroupKeywordsPage(group.groupId);
+                }
+            });
+        }
+    }
+
+    private void showRuleGroupKeywordsPage(String groupId) {
+        currentScreen = "keywords";
+        final CategoryRuleStore.RuleGroup group = rules.getEffectiveRuleGroup(groupId);
+        if (group == null) {
+            Toast.makeText(this, "没有找到该商户合集", Toast.LENGTH_SHORT).show();
+            showRuleGroupsPage();
+            return;
+        }
+        LinearLayout root = pageRoot(group.groupName, false);
+        String source = group.imported ? "来源：自定义关键词规则" : "来源：内置文件 app/src/main/assets/builtin_rule_groups.csv";
+        TextView intro = text(source + "\n每行一个关键词。保存后会用于后续识别分类。", 14, muted, false);
+        intro.setPadding(0, dp(14), 0, dp(8));
+        root.addView(intro);
+
+        final EditText keywords = editText("每行一个关键词", joinKeywords(group.keywords));
+        keywords.setSingleLine(false);
+        keywords.setMinLines(12);
+        keywords.setGravity(Gravity.TOP);
+        root.addView(keywords, matchWrap());
+
+        Button save = actionButton("保存关键词", sage, Color.WHITE, 16);
+        LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        saveLp.setMargins(0, dp(12), 0, 0);
+        root.addView(save, saveLp);
+        save.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                rules.saveRuleGroupKeywords(group.groupId, group.groupName, splitKeywords(keywords.getText().toString()));
+                recategorizeBills();
+                Toast.makeText(MainActivity.this, "关键词已保存", Toast.LENGTH_SHORT).show();
+                showRuleGroupsPage();
+            }
+        });
     }
 
     private TextView statCard(String number, String label) {
@@ -274,13 +470,24 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null) {
+            if (requestCode == REQUEST_SAVE_BILLS || requestCode == REQUEST_SAVE_CONFIG || requestCode == REQUEST_SAVE_RULE_GROUPS) {
+                Toast.makeText(this, "已取消导出", Toast.LENGTH_SHORT).show();
+            }
             return;
         }
         if (requestCode == REQUEST_IMAGES) {
             handleImageSelection(data);
             return;
         }
-        if (requestCode == REQUEST_IMPORT_MAPPING || requestCode == REQUEST_IMPORT_OVERRIDES || requestCode == REQUEST_IMPORT_GROUPS) {
+        if (requestCode == REQUEST_SAVE_BILLS) {
+            handleCustomExport(data.getData());
+            return;
+        }
+        if (requestCode == REQUEST_SAVE_CONFIG || requestCode == REQUEST_SAVE_RULE_GROUPS) {
+            handleCsvExport(data.getData());
+            return;
+        }
+        if (requestCode == REQUEST_IMPORT_CONFIG || requestCode == REQUEST_IMPORT_RULE_GROUPS) {
             handleCsvImport(requestCode, data.getData());
         }
     }
@@ -311,16 +518,18 @@ public class MainActivity extends Activity {
         try {
             String csv = readText(uri);
             String result;
-            if (requestCode == REQUEST_IMPORT_MAPPING) {
-                result = rules.importCategoryMappingsCsv(csv);
-            } else if (requestCode == REQUEST_IMPORT_OVERRIDES) {
-                result = rules.importMerchantOverridesCsv(csv);
+            if (requestCode == REQUEST_IMPORT_CONFIG) {
+                result = rules.importCombinedConfigCsv(csv);
             } else {
                 result = rules.importRuleGroupsCsvAppend(csv);
             }
             recategorizeBills();
-            renderBills();
-            statusText.setText(result + "。当前识别结果已重新分类。");
+            if ("home".equals(currentScreen)) {
+                renderBills();
+                statusText.setText(result + "。当前识别结果已重新分类。");
+            } else if (requestCode == REQUEST_IMPORT_RULE_GROUPS) {
+                showRuleGroupsPage();
+            }
             Toast.makeText(this, result, Toast.LENGTH_LONG).show();
         } catch (Exception e) {
             Toast.makeText(this, "导入失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
@@ -401,8 +610,8 @@ public class MainActivity extends Activity {
             return;
         }
         exportButton.setEnabled(true);
-        statusText.setText("识别完成，正在保存到 Download 文件夹");
-        exportBills();
+        statusText.setText("识别完成，正在生成一木记账导入表格。");
+        prepareTempExportAndPrompt();
     }
 
     private List<BillItem> parsePayPayText(Text text, int imageWidth) {
@@ -482,7 +691,10 @@ public class MainActivity extends Activity {
             if (line.centerX() > imageWidth * 0.78f) {
                 continue;
             }
-            if (line.box.top < amountLine.box.top - 75 || line.box.top > dateLine.box.top + 10) {
+            if (line.box.left < imageWidth * 0.14f) {
+                continue;
+            }
+            if (line.box.top < amountLine.box.top - 110 || line.box.top > dateLine.box.top - 2) {
                 continue;
             }
             if (line == amountLine || line == dateLine || isNoise(line.text)
@@ -491,16 +703,49 @@ public class MainActivity extends Activity {
             }
             candidates.add(line);
         }
-        if (candidates.isEmpty()) {
-            return "";
-        }
         Collections.sort(candidates, new Comparator<LineItem>() {
             @Override
             public int compare(LineItem a, LineItem b) {
-                return a.box.top - b.box.top;
+                if (Math.abs(a.box.top - b.box.top) > 10) {
+                    return a.box.top - b.box.top;
+                }
+                return a.box.left - b.box.left;
             }
         });
-        return candidates.get(0).text;
+        StringBuilder merchant = new StringBuilder();
+        String amountSideText = removeAmount(amountLine.text);
+        if (amountSideText.length() > 0 && !isNoise(amountSideText)) {
+            merchant.append(amountSideText);
+        }
+        int used = 0;
+        int lastBottom = -1;
+        for (LineItem candidate : candidates) {
+            if (used >= 3) {
+                break;
+            }
+            if (lastBottom > 0 && candidate.box.top - lastBottom > 48) {
+                break;
+            }
+            if (merchant.length() > 0) {
+                merchant.append(" ");
+            }
+            merchant.append(candidate.text);
+            lastBottom = candidate.box.bottom;
+            used++;
+        }
+        return polishMerchantName(merchant.toString());
+    }
+
+    private String removeAmount(String text) {
+        return clean(text.replaceAll("[0-9０-９][0-9０-９,，]*\\s*円", ""));
+    }
+
+    private String polishMerchantName(String value) {
+        String merchant = clean(value)
+                .replaceAll("\\s+([店駅丁目])$", "$1")
+                .replaceAll("(?i)\\bS\\s+u\\s+i\\s+c\\s+a\\b", "Suica")
+                .replaceAll("(?i)\\bA\\s+p\\s+p\\s+l\\s+e\\b", "Apple");
+        return merchant;
     }
 
     private Integer extractAmount(String text) {
@@ -619,49 +864,99 @@ public class MainActivity extends Activity {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         form.setPadding(dp(12), dp(8), dp(12), 0);
-        form.addView(text(bill.merchant, 16, ink, true));
-
+        final EditText merchantName = editText("商户名称", bill.merchant);
         final EditText major = editText("一级分类", bill.major);
         final EditText minor = editText("二级分类，可为空", bill.minor);
+        form.addView(text("商户名称", 13, muted, false));
+        form.addView(merchantName);
         form.addView(major);
         form.addView(minor);
 
-        new AlertDialog.Builder(this)
+        final AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("修正分类")
                 .setView(form)
-                .setPositiveButton("保存为商户规则", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialogInterface, int i) {
-                        String majorValue = major.getText().toString().trim();
-                        String minorValue = minor.getText().toString().trim();
-                        if (majorValue.length() == 0) {
-                            Toast.makeText(MainActivity.this, "一级分类不能为空", Toast.LENGTH_SHORT).show();
-                            return;
-                        }
-                        rules.saveMerchantOverride(bill.merchant, majorValue, minorValue);
-                        recategorizeBills();
-                        renderBills();
-                        statusText.setText("已记住 " + bill.merchant + " 的商户修正规则。");
-                    }
-                })
-                .setNegativeButton("取消", null)
-                .show();
+                .create();
+        Button saveRule = actionButton("保存为商户规则", sage, Color.WHITE, 15);
+        Button currentOnly = actionButton("仅修正当前账单", sand, ink, 15);
+        Button cancel = actionButton("取消", card, ink, 15);
+        LinearLayout.LayoutParams actionLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        actionLp.setMargins(0, dp(12), 0, 0);
+        form.addView(saveRule, actionLp);
+        LinearLayout.LayoutParams currentLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        currentLp.setMargins(0, dp(8), 0, 0);
+        form.addView(currentOnly, currentLp);
+        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        cancelLp.setMargins(0, dp(8), 0, 0);
+        form.addView(cancel, cancelLp);
+        currentOnly.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                String merchantValue = merchantName.getText().toString().trim();
+                String majorValue = major.getText().toString().trim();
+                String minorValue = minor.getText().toString().trim();
+                if (merchantValue.length() == 0) {
+                    Toast.makeText(MainActivity.this, "商户名称不能为空", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                if (majorValue.length() == 0) {
+                    Toast.makeText(MainActivity.this, "一级分类不能为空", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                bill.merchant = merchantValue;
+                bill.major = majorValue;
+                bill.minor = minorValue;
+                bill.groupId = "";
+                bill.categorySource = "当前账单修正";
+                renderBills();
+                statusText.setText("已仅修正当前账单。");
+                dialog.dismiss();
+            }
+        });
+        saveRule.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                String merchantValue = merchantName.getText().toString().trim();
+                String majorValue = major.getText().toString().trim();
+                String minorValue = minor.getText().toString().trim();
+                if (merchantValue.length() == 0) {
+                    Toast.makeText(MainActivity.this, "商户名称不能为空", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                if (majorValue.length() == 0) {
+                    Toast.makeText(MainActivity.this, "一级分类不能为空", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                bill.merchant = merchantValue;
+                rules.saveMerchantOverride(merchantValue, majorValue, minorValue);
+                recategorizeBills();
+                renderBills();
+                statusText.setText("已记住 " + merchantValue + " 的商户修正规则。");
+                dialog.dismiss();
+            }
+        });
+        cancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                dialog.dismiss();
+            }
+        });
+        dialog.show();
     }
 
-    private void showCategoryRulesDialog(final boolean allowCancel) {
+    private void showCategoryRulesPage() {
+        currentScreen = "category";
         final List<CategoryRuleStore.RuleGroup> groups = rules.getEffectiveRuleGroups();
         final Map<String, CategoryRuleStore.CategoryMapping> mappings = rules.loadMappings();
         final ArrayList<EditText> majors = new ArrayList<EditText>();
         final ArrayList<EditText> minors = new ArrayList<EditText>();
 
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout form = new LinearLayout(this);
-        form.setOrientation(LinearLayout.VERTICAL);
-        form.setPadding(dp(12), dp(8), dp(12), 0);
-        scroll.addView(form);
+        LinearLayout form = pageRoot("编辑账本分类映射", true);
 
-        TextView intro = text("为每个商户合集设置你账本中的分类。二级分类可以留空。", 14, muted, false);
-        intro.setPadding(0, 0, 0, dp(10));
+        TextView intro = text("为每个商户合集设置账本分类。二级分类可以留空。", 14, muted, false);
+        intro.setPadding(0, dp(14), 0, dp(10));
         form.addView(intro);
 
         for (CategoryRuleStore.RuleGroup group : groups) {
@@ -669,63 +964,53 @@ public class MainActivity extends Activity {
             if (mapping == null) {
                 mapping = rules.recommendedMapping(group.groupId);
             }
-            TextView label = text(group.groupName + "  ·  " + group.groupId + "  ·  " + group.keywords.size() + " 个关键词" + (group.imported ? "  ·  含导入规则" : "  ·  内置规则"), 14, ink, true);
-            label.setPadding(0, dp(12), 0, 0);
-            form.addView(label);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(8), 0, 0);
+            form.addView(row, matchWrap());
+
+            TextView label = text(group.groupName, 14, ink, true);
+            label.setMaxLines(2);
+            row.addView(label, new LinearLayout.LayoutParams(dp(92), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            LinearLayout fields = new LinearLayout(this);
+            fields.setOrientation(LinearLayout.HORIZONTAL);
+            row.addView(fields, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
             EditText major = editText("一级分类，必填", mapping.major);
             EditText minor = editText("二级分类，可为空", mapping.minor);
             majors.add(major);
             minors.add(minor);
-            form.addView(major);
-            form.addView(minor);
+            fields.addView(major, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            LinearLayout.LayoutParams minorLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            minorLp.setMargins(dp(8), 0, 0, 0);
+            fields.addView(minor, minorLp);
         }
 
-        Button overrides = actionButton("管理商户单独修正规则", sand, ink, 14);
-        LinearLayout.LayoutParams overrideLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
-        overrideLp.setMargins(0, dp(14), 0, 0);
-        form.addView(overrides, overrideLp);
-        overrides.setOnClickListener(new View.OnClickListener() {
+        Button save = actionButton("保存分类映射", sage, Color.WHITE, 16);
+        LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        saveLp.setMargins(0, dp(16), 0, 0);
+        form.addView(save, saveLp);
+        save.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                showOverridesDialog();
-            }
-        });
-
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle(allowCancel ? "分类规则设置" : "首次分类设置")
-                .setView(scroll)
-                .setPositiveButton("保存", null)
-                .setNegativeButton(allowCancel ? "取消" : null, null)
-                .create();
-        dialog.setCancelable(allowCancel);
-        dialog.setOnShowListener(new DialogInterface.OnShowListener() {
-            @Override
-            public void onShow(final DialogInterface dialogInterface) {
-                AlertDialog alert = (AlertDialog) dialogInterface;
-                alert.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View view) {
-                        ArrayList<CategoryRuleStore.CategoryMapping> newMappings = new ArrayList<CategoryRuleStore.CategoryMapping>();
-                        for (int i = 0; i < groups.size(); i++) {
-                            String major = majors.get(i).getText().toString().trim();
-                            String minor = minors.get(i).getText().toString().trim();
-                            if (major.length() == 0) {
-                                Toast.makeText(MainActivity.this, groups.get(i).groupName + " 的一级分类不能为空", Toast.LENGTH_SHORT).show();
-                                return;
-                            }
-                            newMappings.add(new CategoryRuleStore.CategoryMapping(groups.get(i).groupId, major, minor));
-                        }
-                        rules.saveMappings(newMappings);
-                        recategorizeBills();
-                        renderBills();
-                        statusText.setText("分类规则已保存。");
-                        dialogInterface.dismiss();
+                ArrayList<CategoryRuleStore.CategoryMapping> newMappings = new ArrayList<CategoryRuleStore.CategoryMapping>();
+                for (int i = 0; i < groups.size(); i++) {
+                    String major = majors.get(i).getText().toString().trim();
+                    String minor = minors.get(i).getText().toString().trim();
+                    if (major.length() == 0) {
+                        Toast.makeText(MainActivity.this, groups.get(i).groupName + " 的一级分类不能为空", Toast.LENGTH_SHORT).show();
+                        return;
                     }
-                });
+                    newMappings.add(new CategoryRuleStore.CategoryMapping(groups.get(i).groupId, major, minor));
+                }
+                rules.saveMappings(newMappings);
+                recategorizeBills();
+                Toast.makeText(MainActivity.this, "分类规则已保存", Toast.LENGTH_SHORT).show();
             }
         });
-        dialog.show();
     }
 
     private void showOverridesDialog() {
@@ -819,80 +1104,151 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void exportBills() {
+    private void prepareTempExportAndPrompt() {
         if (bills.isEmpty()) {
             Toast.makeText(this, "没有可导出的账单", Toast.LENGTH_SHORT).show();
             return;
         }
-        if (Build.VERSION.SDK_INT <= 28 && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_WRITE_BILLS);
+        try {
+            File tempFile = writeTempWorkbook();
+            final Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", tempFile);
+            statusText.setText("表格已生成，可以直接分享至一木记账 App 快速导入。");
+            showTempShareDialog(uri);
+        } catch (Exception e) {
+            statusText.setText("生成表格失败：" + e.getMessage());
+            Toast.makeText(this, "生成表格失败", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private File writeTempWorkbook() throws Exception {
+        File output = new File(getCacheDir(), "paypay_yimu_latest.xls");
+        FileOutputStream outputStream = new FileOutputStream(output, false);
+        outputStream.write(XlsExporter.create(bills));
+        outputStream.close();
+        return output;
+    }
+
+    private void showTempShareDialog(final Uri uri) {
+        new AlertDialog.Builder(this)
+                .setTitle("表格已生成")
+                .setMessage("表格已生成，可以直接分享至一木记账 App 快速导入。")
+                .setPositiveButton("分享至一木记账 App", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int i) {
+                        shareWorkbook(uri);
+                    }
+                })
+                .setNegativeButton("自定义导出表格", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int i) {
+                        startCustomExport();
+                    }
+                })
+                .setNeutralButton("稍后", null)
+                .show();
+    }
+
+    private void shareWorkbook(Uri uri) {
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType(MIME_EXCEL);
+        intent.putExtra(Intent.EXTRA_STREAM, uri);
+        intent.putExtra(Intent.EXTRA_TITLE, "PayPay_一木记账.xls");
+        intent.setClipData(ClipData.newUri(getContentResolver(), "一木记账导入表格", uri));
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(Intent.createChooser(intent, "分享至一木记账 App"));
+        } catch (Exception e) {
+            Toast.makeText(this, "无法打开分享面板：" + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void startCustomExport() {
+        if (bills.isEmpty()) {
+            Toast.makeText(this, "没有可导出的账单", Toast.LENGTH_SHORT).show();
             return;
         }
         try {
-            String fileName = "PayPay_一木记账_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".xls";
-            byte[] workbook = XlsExporter.create(bills);
-            writeDownload(fileName, workbook, "application/vnd.ms-excel");
-            statusText.setText("已保存到 Download/" + fileName);
-            Toast.makeText(this, "导出完成", Toast.LENGTH_LONG).show();
+            pendingCustomWorkbook = XlsExporter.create(bills);
+            pendingCustomWorkbookName = createWorkbookFileName();
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType(MIME_EXCEL);
+            intent.putExtra(Intent.EXTRA_TITLE, pendingCustomWorkbookName);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            startActivityForResult(intent, REQUEST_SAVE_BILLS);
         } catch (Exception e) {
             statusText.setText("导出失败：" + e.getMessage());
             Toast.makeText(this, "导出失败", Toast.LENGTH_LONG).show();
         }
     }
 
-    private void exportConfig() {
-        if (Build.VERSION.SDK_INT <= 28 && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_WRITE_CONFIG);
+    private void handleCustomExport(Uri uri) {
+        if (uri == null || pendingCustomWorkbook == null) {
             return;
         }
         try {
-            writeDownload("category_mapping.csv", rules.exportCategoryMappingsCsv().getBytes("UTF-8"), "text/csv");
-            writeDownload("merchant_override.csv", rules.exportMerchantOverridesCsv().getBytes("UTF-8"), "text/csv");
-            writeDownload("rule_groups.csv", rules.exportRuleGroupsCsv().getBytes("UTF-8"), "text/csv");
-            statusText.setText("已导出分类配置到 Download 文件夹。");
-            Toast.makeText(this, "分类配置导出完成", Toast.LENGTH_LONG).show();
+            writeUri(uri, pendingCustomWorkbook);
+            statusText.setText("已导出至 " + uri.toString());
+            Toast.makeText(this, "已导出至所选路径", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            statusText.setText("导出失败：" + e.getMessage());
+            Toast.makeText(this, "导出失败", Toast.LENGTH_LONG).show();
+        } finally {
+            pendingCustomWorkbook = null;
+            pendingCustomWorkbookName = null;
+        }
+    }
+
+    private String createWorkbookFileName() {
+        return "PayPay_一木记账_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".xls";
+    }
+
+    private void exportConfig() {
+        try {
+            pendingCsvExport = rules.exportCombinedConfigCsv().getBytes("UTF-8");
+            startCsvSave("paypay_yimu_category_config.csv", REQUEST_SAVE_CONFIG);
         } catch (Exception e) {
             Toast.makeText(this, "导出配置失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (grantResults.length == 0 || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-        if (requestCode == REQUEST_WRITE_BILLS) {
-            exportBills();
-        } else if (requestCode == REQUEST_WRITE_CONFIG) {
-            exportConfig();
+    private void exportRuleGroups() {
+        try {
+            pendingCsvExport = rules.exportRuleGroupsCsv().getBytes("UTF-8");
+            startCsvSave("paypay_yimu_merchant_keywords.csv", REQUEST_SAVE_RULE_GROUPS);
+        } catch (Exception e) {
+            Toast.makeText(this, "导出关键词规则失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
-    private void writeDownload(String fileName, byte[] data, String mimeType) throws IOException {
-        if (Build.VERSION.SDK_INT >= 29) {
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-            values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
-            values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
-            ContentResolver resolver = getContentResolver();
-            Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) {
-                throw new IOException("无法创建下载文件");
-            }
-            OutputStream outputStream = resolver.openOutputStream(uri);
-            if (outputStream == null) {
-                throw new IOException("无法写入下载文件");
-            }
-            outputStream.write(data);
-            outputStream.close();
+    private void startCsvSave(String fileName, int requestCode) {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType(MIME_CSV);
+        intent.putExtra(Intent.EXTRA_TITLE, fileName);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        startActivityForResult(intent, requestCode);
+    }
+
+    private void handleCsvExport(Uri uri) {
+        if (uri == null || pendingCsvExport == null) {
             return;
         }
-        File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-        if (!downloads.exists() && !downloads.mkdirs()) {
-            throw new IOException("无法创建 Download 文件夹");
+        try {
+            writeUri(uri, pendingCsvExport);
+            Toast.makeText(this, "已导出至所选路径", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "导出失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+        } finally {
+            pendingCsvExport = null;
         }
-        FileOutputStream outputStream = new FileOutputStream(new File(downloads, fileName));
+    }
+
+    private void writeUri(Uri uri, byte[] data) throws IOException {
+        OutputStream outputStream = getContentResolver().openOutputStream(uri, "w");
+        if (outputStream == null) {
+            throw new IOException("无法写入文件");
+        }
         outputStream.write(data);
         outputStream.close();
     }
@@ -910,6 +1266,31 @@ public class MainActivity extends Activity {
         }
         inputStream.close();
         return bytes.toString("UTF-8");
+    }
+
+    private String joinKeywords(Set<String> values) {
+        ArrayList<String> sorted = new ArrayList<String>(values);
+        Collections.sort(sorted);
+        StringBuilder out = new StringBuilder();
+        for (String value : sorted) {
+            if (out.length() > 0) {
+                out.append('\n');
+            }
+            out.append(value);
+        }
+        return out.toString();
+    }
+
+    private List<String> splitKeywords(String text) {
+        LinkedHashSet<String> out = new LinkedHashSet<String>();
+        String[] lines = text.split("[\\r\\n]+");
+        for (String line : lines) {
+            String value = line.trim();
+            if (value.length() > 0) {
+                out.add(value);
+            }
+        }
+        return new ArrayList<String>(out);
     }
 
     private Button actionButton(String label, int color, int textColor, int sp) {
@@ -1001,7 +1382,7 @@ public class MainActivity extends Activity {
     }
 
     private static class BillItem {
-        final String merchant;
+        String merchant;
         final String date;
         final String time;
         final int amount;

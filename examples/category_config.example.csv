@@ -1,0 +1,7 @@
+record_type,group_id,major,minor,merchant_key,display_name
+mapping,restaurant,食品餐饮,外出吃饭,,
+mapping,retail_convenience,食品餐饮,便利店,,
+mapping,retail_supermarket,食品餐饮,食材采购,,
+mapping,transport_train,出行交通,公共交通,,
+mapping,subscription,居家生活,App会员,,
+override,,休闲娱乐,电影娱乐,toho_cinemas,TOHO CINEMAS

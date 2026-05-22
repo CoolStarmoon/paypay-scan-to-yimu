@@ -1,3 +1,11 @@
 group_id,group_name,keywords
-convenience_store,便利店,"lawson|ローソン|familymart|ファミリーマート|ファミマ|7-eleven|セブンイレブン"
+restaurant,餐饮,"mcdonald|マクドナルド|すき家|吉野家|ラーメン|カフェ"
+retail_convenience,便利店,"lawson|ローソン|familymart|ファミリーマート|ファミマ|7-eleven|セブンイレブン"
+retail_supermarket,超市,"イオン|バロー|業務スーパー|ライフ|西友|マルエツ"
+retail_drugstore,药妆店,"matsukiyo|マツモトキヨシ|welcia|ウエルシア|スギ薬局"
+online_shopping,线上购物,"amazon|楽天市場|yahoo shopping|mercari|zozotown"
+transport_train,电车地铁,"jr|suica|pasmo|地下鉄|東京メトロ|名鉄"
+entertainment_movie,电影,"toho cinemas|イオンシネマ|映画|movie|ムビチケ"
+entertainment_show,演出,"concert|ライブ|劇場|チケットぴあ|eplus|artist site"
 subscription,订阅服务,"openai|chatgpt|netflix|spotify|apple.com/bill|google play|youtube premium"
+telecom,话费宽带,"docomo|au|softbank|uq mobile|rakuten mobile|nuro"

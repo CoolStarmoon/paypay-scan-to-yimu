@@ -7,6 +7,9 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -23,17 +26,28 @@ public class CategoryRuleStore {
     private static final String KEY_MAPPINGS = "category_mapping_json";
     private static final String KEY_OVERRIDES = "merchant_override_json";
     private static final String KEY_IMPORTED_GROUPS = "imported_rule_groups_json";
+    private static final String KEY_MIGRATION_NOTICE = "migration_notice";
 
+    private final Context context;
     private final SharedPreferences prefs;
     private final LinkedHashMap<String, RuleGroup> builtInGroups = new LinkedHashMap<String, RuleGroup>();
 
     public CategoryRuleStore(Context context) {
+        this.context = context.getApplicationContext();
         prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         buildBuiltInGroups();
     }
 
     public boolean hasUserMappings() {
-        return prefs.contains(KEY_MAPPINGS);
+        return prefs.contains(KEY_MAPPINGS) && !loadMappings().isEmpty();
+    }
+
+    public boolean consumeMigrationNotice() {
+        boolean shouldShow = prefs.getBoolean(KEY_MIGRATION_NOTICE, false);
+        if (shouldShow) {
+            prefs.edit().remove(KEY_MIGRATION_NOTICE).apply();
+        }
+        return shouldShow;
     }
 
     public List<RuleGroup> getEffectiveRuleGroups() {
@@ -42,10 +56,13 @@ public class CategoryRuleStore {
             merged.put(group.groupId, group.copy());
         }
         for (RuleGroup imported : loadImportedGroups().values()) {
-            RuleGroup target = merged.get(imported.groupId);
+            String targetId = migrateGroupId(imported.groupId);
+            RuleGroup target = merged.get(targetId);
             if (target == null) {
-                merged.put(imported.groupId, imported.copy());
+                imported.groupId = targetId;
+                merged.put(targetId, imported.copy());
             } else {
+                target.keywords.clear();
                 target.keywords.addAll(imported.keywords);
                 target.imported = true;
             }
@@ -60,6 +77,16 @@ public class CategoryRuleStore {
         return groups;
     }
 
+    public RuleGroup getEffectiveRuleGroup(String groupId) {
+        groupId = migrateGroupId(groupId);
+        for (RuleGroup group : getEffectiveRuleGroups()) {
+            if (group.groupId.equals(groupId)) {
+                return group;
+            }
+        }
+        return null;
+    }
+
     public Map<String, CategoryMapping> loadMappings() {
         LinkedHashMap<String, CategoryMapping> mappings = new LinkedHashMap<String, CategoryMapping>();
         String raw = prefs.getString(KEY_MAPPINGS, "");
@@ -68,15 +95,33 @@ public class CategoryRuleStore {
         }
         try {
             JSONArray array = new JSONArray(raw);
+            boolean changed = false;
+            boolean conflict = false;
             for (int i = 0; i < array.length(); i++) {
                 JSONObject item = array.getJSONObject(i);
+                String originalGroupId = item.optString("group_id");
+                String groupId = migrateGroupId(originalGroupId);
                 CategoryMapping mapping = new CategoryMapping(
-                        item.optString("group_id"),
+                        groupId,
                         item.optString("major"),
                         item.optString("minor"));
                 if (mapping.groupId.length() > 0 && mapping.major.length() > 0) {
+                    CategoryMapping previous = mappings.get(mapping.groupId);
+                    if (!groupId.equals(originalGroupId)) {
+                        changed = true;
+                    }
+                    if (previous != null && (!previous.major.equals(mapping.major) || !previous.minor.equals(mapping.minor))) {
+                        conflict = true;
+                        changed = true;
+                    }
                     mappings.put(mapping.groupId, mapping);
                 }
+            }
+            if (changed) {
+                saveMappings(new ArrayList<CategoryMapping>(mappings.values()));
+            }
+            if (conflict) {
+                prefs.edit().putBoolean(KEY_MIGRATION_NOTICE, true).apply();
             }
         } catch (JSONException ignored) {
         }
@@ -108,30 +153,43 @@ public class CategoryRuleStore {
     }
 
     public CategoryMapping recommendedMapping(String groupId) {
-        if ("convenience_store".equals(groupId)) {
-            return new CategoryMapping(groupId, "食品餐饮", "便利店");
-        }
-        if ("supermarket".equals(groupId)) {
-            return new CategoryMapping(groupId, "食品餐饮", "食材采购");
-        }
-        if ("restaurant_fast".equals(groupId)) {
-            return new CategoryMapping(groupId, "食品餐饮", "日常正餐");
-        }
-        if ("restaurant_dining".equals(groupId)) {
-            return new CategoryMapping(groupId, "休闲娱乐", "外出吃饭");
-        }
-        if ("clothing_store".equals(groupId)) {
-            return new CategoryMapping(groupId, "购物消费", "服饰鞋包");
-        }
-        if ("transport_train".equals(groupId)) {
-            return new CategoryMapping(groupId, "出行交通", "公共交通");
-        }
-        if ("subscription".equals(groupId)) {
-            return new CategoryMapping(groupId, "居家生活", "App会员");
-        }
-        if ("entertainment_movie".equals(groupId)) {
-            return new CategoryMapping(groupId, "休闲娱乐", "电影娱乐");
-        }
+        groupId = migrateGroupId(groupId);
+        if ("restaurant".equals(groupId)) return new CategoryMapping(groupId, "食品餐饮", "外出吃饭");
+        if ("retail_convenience".equals(groupId)) return new CategoryMapping(groupId, "食品餐饮", "便利店");
+        if ("retail_supermarket".equals(groupId)) return new CategoryMapping(groupId, "食品餐饮", "食材采购");
+        if ("retail_drugstore".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "药妆日化");
+        if ("retail_home_center".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "日用百货");
+        if ("retail_electronics".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "大额数码");
+        if ("retail_bookstore".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "书籍文具");
+        if ("retail_cosmetics".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "美妆护肤");
+        if ("retail_100yen".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "日用百货");
+        if ("retail_sports".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "运动户外");
+        if ("retail_baby_pet".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "母婴宠物");
+        if ("retail_furniture".equals(groupId)) return new CategoryMapping(groupId, "居家生活", "家具家饰");
+        if ("clothing_store".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "服饰鞋包");
+        if ("online_shopping".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "日用百货");
+        if ("delivery_parcel".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "运费其他");
+        if ("fee_service".equals(groupId)) return new CategoryMapping(groupId, "购物消费", "运费其他");
+        if ("food_delivery".equals(groupId)) return new CategoryMapping(groupId, "食品餐饮", "外卖");
+        if ("transport_train".equals(groupId)) return new CategoryMapping(groupId, "出行交通", "公共交通");
+        if ("transport_shinkansen".equals(groupId)) return new CategoryMapping(groupId, "出行交通", "火车");
+        if ("taxi".equals(groupId)) return new CategoryMapping(groupId, "出行交通", "打车租车");
+        if ("parking".equals(groupId)) return new CategoryMapping(groupId, "出行交通", "停车路费");
+        if ("gas_station".equals(groupId)) return new CategoryMapping(groupId, "出行交通", "加油充电");
+        if ("flight".equals(groupId)) return new CategoryMapping(groupId, "出行交通", "飞机");
+        if ("hotel".equals(groupId)) return new CategoryMapping(groupId, "休闲娱乐", "住宿");
+        if ("attraction_ticket".equals(groupId)) return new CategoryMapping(groupId, "休闲娱乐", "门票演出");
+        if ("entertainment_movie".equals(groupId)) return new CategoryMapping(groupId, "休闲娱乐", "电影娱乐");
+        if ("entertainment_show".equals(groupId)) return new CategoryMapping(groupId, "休闲娱乐", "门票演出");
+        if ("entertainment_place".equals(groupId)) return new CategoryMapping(groupId, "休闲娱乐", "其他");
+        if ("subscription".equals(groupId)) return new CategoryMapping(groupId, "居家生活", "App会员");
+        if ("rent".equals(groupId)) return new CategoryMapping(groupId, "居家生活", "房租");
+        if ("telecom".equals(groupId)) return new CategoryMapping(groupId, "居家生活", "话费宽带");
+        if ("utility_electric_water".equals(groupId)) return new CategoryMapping(groupId, "居家生活", "水费");
+        if ("utility_gas".equals(groupId)) return new CategoryMapping(groupId, "居家生活", "燃气费");
+        if ("public_service".equals(groupId)) return new CategoryMapping(groupId, "居家生活", "公共服务");
+        if ("education_admin".equals(groupId)) return new CategoryMapping(groupId, "文化教育", "教务缴费");
+        if ("medical".equals(groupId)) return new CategoryMapping(groupId, "健康医疗", "医疗");
         return new CategoryMapping(groupId, "待分类", "");
     }
 
@@ -143,7 +201,7 @@ public class CategoryRuleStore {
             }
             JSONObject item = new JSONObject();
             try {
-                item.put("group_id", mapping.groupId);
+                item.put("group_id", migrateGroupId(mapping.groupId));
                 item.put("major", mapping.major.trim());
                 item.put("minor", mapping.minor.trim());
                 array.put(item);
@@ -195,7 +253,7 @@ public class CategoryRuleStore {
                     continue;
                 }
                 if (key.length() <= 2) {
-                    if (normalized.equals(key) || normalized.startsWith(key + " ") || normalized.startsWith(key)) {
+                    if (normalized.equals(key) || normalized.startsWith(key + " ")) {
                         return group;
                     }
                 } else if (normalized.contains(key)) {
@@ -217,10 +275,9 @@ public class CategoryRuleStore {
         int updated = 0;
         int skipped = 0;
         for (int i = 1; i < rows.size(); i++) {
-            String[] row = rows.get(i);
-            String groupId = cell(row, 0).trim();
-            String major = cell(row, 1).trim();
-            String minor = cell(row, 2).trim();
+            String groupId = migrateGroupId(cell(rows.get(i), 0).trim());
+            String major = cell(rows.get(i), 1).trim();
+            String minor = cell(rows.get(i), 2).trim();
             if (groupId.length() == 0 || major.length() == 0 || !knownIds.contains(groupId)) {
                 skipped++;
                 continue;
@@ -229,7 +286,7 @@ public class CategoryRuleStore {
             updated++;
         }
         saveMappings(new ArrayList<CategoryMapping>(current.values()));
-        return "导入分类映射 " + updated + " 条，跳过 " + skipped + " 条";
+        return "导入账本分类映射 " + updated + " 条，跳过 " + skipped + " 条";
     }
 
     public String importMerchantOverridesCsv(String csv) throws Exception {
@@ -239,11 +296,10 @@ public class CategoryRuleStore {
         int updated = 0;
         int skipped = 0;
         for (int i = 1; i < rows.size(); i++) {
-            String[] row = rows.get(i);
-            String key = cell(row, 0).trim();
-            String display = cell(row, 1).trim();
-            String major = cell(row, 2).trim();
-            String minor = cell(row, 3).trim();
+            String key = cell(rows.get(i), 0).trim();
+            String display = cell(rows.get(i), 1).trim();
+            String major = cell(rows.get(i), 2).trim();
+            String minor = cell(rows.get(i), 3).trim();
             if (key.length() == 0 && display.length() > 0) {
                 key = merchantKey(display);
             }
@@ -255,7 +311,52 @@ public class CategoryRuleStore {
             updated++;
         }
         saveOverrides(new ArrayList<MerchantOverride>(current.values()));
-        return "导入商户修正 " + updated + " 条，跳过 " + skipped + " 条";
+        return "导入单个商户修正规则 " + updated + " 条，跳过 " + skipped + " 条";
+    }
+
+    public String importCombinedConfigCsv(String csv) throws Exception {
+        List<String[]> rows = parseCsv(csv);
+        requireHeader(rows, "record_type", "group_id", "major", "minor", "merchant_key", "display_name");
+        Set<String> knownIds = new LinkedHashSet<String>();
+        for (RuleGroup group : getEffectiveRuleGroups()) {
+            knownIds.add(group.groupId);
+        }
+        LinkedHashMap<String, CategoryMapping> mappings = new LinkedHashMap<String, CategoryMapping>(loadMappings());
+        LinkedHashMap<String, MerchantOverride> overrides = new LinkedHashMap<String, MerchantOverride>(loadOverrides());
+        int mappingCount = 0;
+        int overrideCount = 0;
+        int skipped = 0;
+        for (int i = 1; i < rows.size(); i++) {
+            String type = cell(rows.get(i), 0).trim();
+            String groupId = migrateGroupId(cell(rows.get(i), 1).trim());
+            String major = cell(rows.get(i), 2).trim();
+            String minor = cell(rows.get(i), 3).trim();
+            String key = cell(rows.get(i), 4).trim();
+            String display = cell(rows.get(i), 5).trim();
+            if ("mapping".equals(type)) {
+                if (groupId.length() == 0 || major.length() == 0 || !knownIds.contains(groupId)) {
+                    skipped++;
+                    continue;
+                }
+                mappings.put(groupId, new CategoryMapping(groupId, major, minor));
+                mappingCount++;
+            } else if ("override".equals(type)) {
+                if (key.length() == 0 && display.length() > 0) {
+                    key = merchantKey(display);
+                }
+                if (key.length() == 0 || major.length() == 0) {
+                    skipped++;
+                    continue;
+                }
+                overrides.put(key, new MerchantOverride(key, display, major, minor));
+                overrideCount++;
+            } else {
+                skipped++;
+            }
+        }
+        saveMappings(new ArrayList<CategoryMapping>(mappings.values()));
+        saveOverrides(new ArrayList<MerchantOverride>(overrides.values()));
+        return "导入分类配置：账本映射 " + mappingCount + " 条，商户修正 " + overrideCount + " 条，跳过 " + skipped + " 条";
     }
 
     public String importRuleGroupsCsvAppend(String csv) throws Exception {
@@ -265,10 +366,9 @@ public class CategoryRuleStore {
         int updated = 0;
         int risk = 0;
         for (int i = 1; i < rows.size(); i++) {
-            String[] row = rows.get(i);
-            String groupId = cell(row, 0).trim();
-            String groupName = cell(row, 1).trim();
-            String keywords = cell(row, 2).trim();
+            String groupId = migrateGroupId(cell(rows.get(i), 0).trim());
+            String groupName = cell(rows.get(i), 1).trim();
+            String keywords = cell(rows.get(i), 2).trim();
             if (groupId.length() == 0 || groupName.length() == 0 || keywords.length() == 0) {
                 continue;
             }
@@ -276,6 +376,8 @@ public class CategoryRuleStore {
             if (target == null) {
                 target = new RuleGroup(groupId, groupName, 1000 + imported.size(), true);
                 imported.put(groupId, target);
+            } else {
+                target.keywords.clear();
             }
             for (String keyword : keywords.split("\\|")) {
                 String cleaned = keyword.trim();
@@ -283,14 +385,33 @@ public class CategoryRuleStore {
                     target.keywords.add(cleaned);
                 }
             }
-            RuleGroup effective = findEffectiveGroupAfterImport(groupId, target);
-            if (effective.keywords.size() < 100) {
+            if (target.keywords.size() < 100) {
                 risk++;
             }
             updated++;
         }
         saveImportedGroups(new ArrayList<RuleGroup>(imported.values()));
-        return "导入商户合集 " + updated + " 组" + (risk > 0 ? "，其中 " + risk + " 组少于 100 个关键词" : "");
+        return "导入商户识别规则 " + updated + " 组" + (risk > 0 ? "，其中 " + risk + " 组少于 100 个关键词" : "");
+    }
+
+    public void saveRuleGroupKeywords(String groupId, String groupName, List<String> keywords) {
+        groupId = migrateGroupId(groupId);
+        LinkedHashMap<String, RuleGroup> imported = new LinkedHashMap<String, RuleGroup>(loadImportedGroups());
+        RuleGroup target = imported.get(groupId);
+        if (target == null) {
+            target = new RuleGroup(groupId, groupName, 1000 + imported.size(), true);
+            imported.put(groupId, target);
+        }
+        target.keywords.clear();
+        LinkedHashSet<String> cleaned = new LinkedHashSet<String>();
+        for (String keyword : keywords) {
+            String value = keyword.trim();
+            if (value.length() > 0) {
+                cleaned.add(value);
+            }
+        }
+        target.keywords.addAll(cleaned);
+        saveImportedGroups(new ArrayList<RuleGroup>(imported.values()));
     }
 
     public String exportCategoryMappingsCsv() {
@@ -301,9 +422,7 @@ public class CategoryRuleStore {
             if (mapping == null) {
                 mapping = recommendedMapping(group.groupId);
             }
-            out.append(csv(group.groupId)).append(',')
-                    .append(csv(mapping.major)).append(',')
-                    .append(csv(mapping.minor)).append('\n');
+            out.append(csv(group.groupId)).append(',').append(csv(mapping.major)).append(',').append(csv(mapping.minor)).append('\n');
         }
         return out.toString();
     }
@@ -311,10 +430,7 @@ public class CategoryRuleStore {
     public String exportMerchantOverridesCsv() {
         StringBuilder out = new StringBuilder("\uFEFFmerchant_key,display_name,major,minor\n");
         for (MerchantOverride override : loadOverrides().values()) {
-            out.append(csv(override.merchantKey)).append(',')
-                    .append(csv(override.displayName)).append(',')
-                    .append(csv(override.major)).append(',')
-                    .append(csv(override.minor)).append('\n');
+            out.append(csv(override.merchantKey)).append(',').append(csv(override.displayName)).append(',').append(csv(override.major)).append(',').append(csv(override.minor)).append('\n');
         }
         return out.toString();
     }
@@ -324,9 +440,30 @@ public class CategoryRuleStore {
         for (RuleGroup group : getEffectiveRuleGroups()) {
             ArrayList<String> sorted = new ArrayList<String>(group.keywords);
             Collections.sort(sorted);
-            out.append(csv(group.groupId)).append(',')
-                    .append(csv(group.groupName)).append(',')
-                    .append(csv(join(sorted, "|"))).append('\n');
+            out.append(csv(group.groupId)).append(',').append(csv(group.groupName)).append(',').append(csv(join(sorted, "|"))).append('\n');
+        }
+        return out.toString();
+    }
+
+    public String exportCombinedConfigCsv() {
+        StringBuilder out = new StringBuilder("\uFEFFrecord_type,group_id,major,minor,merchant_key,display_name\n");
+        Map<String, CategoryMapping> mappings = loadMappings();
+        for (RuleGroup group : getEffectiveRuleGroups()) {
+            CategoryMapping mapping = mappings.get(group.groupId);
+            if (mapping == null) {
+                mapping = recommendedMapping(group.groupId);
+            }
+            out.append("mapping,")
+                    .append(csv(group.groupId)).append(',')
+                    .append(csv(mapping.major)).append(',')
+                    .append(csv(mapping.minor)).append(",,\n");
+        }
+        for (MerchantOverride override : loadOverrides().values()) {
+            out.append("override,,")
+                    .append(csv(override.major)).append(',')
+                    .append(csv(override.minor)).append(',')
+                    .append(csv(override.merchantKey)).append(',')
+                    .append(csv(override.displayName)).append('\n');
         }
         return out.toString();
     }
@@ -340,19 +477,21 @@ public class CategoryRuleStore {
     public static String normalizeMerchant(String merchant) {
         String normalized = Normalizer.normalize(merchant == null ? "" : merchant, Normalizer.Form.NFKC)
                 .toLowerCase(Locale.ROOT)
-                .replaceAll("[・＊*／/\\\\()（）\\[\\]【】.,，。]", " ")
+                .replaceAll("[・＊*／/\\\\()（）\\[\\]【】.,，。:：]", " ")
                 .replaceAll("\\bpaypay\\b", " ")
                 .replaceAll("\\bvisa\\b", " ")
+                .replaceAll("(?<=[a-z])\\s+(?=[a-z])", "")
                 .replaceAll("\\s+", " ")
                 .trim();
         normalized = normalized.replaceAll("\\s+[0-9]{3,}$", "");
         return normalized;
     }
 
-    private RuleGroup findEffectiveGroupAfterImport(String groupId, RuleGroup imported) {
-        RuleGroup base = builtInGroups.containsKey(groupId) ? builtInGroups.get(groupId).copy() : imported.copy();
-        base.keywords.addAll(imported.keywords);
-        return base;
+    private String migrateGroupId(String groupId) {
+        if ("restaurant_fast".equals(groupId) || "restaurant_dining".equals(groupId)) return "restaurant";
+        if ("convenience_store".equals(groupId)) return "retail_convenience";
+        if ("supermarket".equals(groupId)) return "retail_supermarket";
+        return groupId == null ? "" : groupId;
     }
 
     private Map<String, RuleGroup> loadImportedGroups() {
@@ -365,7 +504,7 @@ public class CategoryRuleStore {
             JSONArray array = new JSONArray(raw);
             for (int i = 0; i < array.length(); i++) {
                 JSONObject item = array.getJSONObject(i);
-                RuleGroup group = new RuleGroup(item.optString("group_id"), item.optString("group_name"), 1000 + i, true);
+                RuleGroup group = new RuleGroup(migrateGroupId(item.optString("group_id")), item.optString("group_name"), 1000 + i, true);
                 JSONArray keywords = item.optJSONArray("keywords");
                 if (keywords != null) {
                     for (int j = 0; j < keywords.length(); j++) {
@@ -425,85 +564,43 @@ public class CategoryRuleStore {
     }
 
     private void buildBuiltInGroups() {
-        addGroup(0, "convenience_store", "便利店", new String[]{
-                "lawson", "ローソン", "ローソンストア", "natural lawson", "ナチュラルローソン", "familymart", "family mart", "ファミリーマート", "ファミマ", "famima",
-                "7-eleven", "7 eleven", "seven eleven", "セブンイレブン", "セブン-イレブン", "セブン", "mini stop", "ministop", "ミニストップ", "デイリーヤマザキ",
-                "daily yamazaki", "newdays", "ニューデイズ", "ポプラ", "poplar", "seicomart", "セイコーマート", "コミュニティストア", "生活彩家", "スリーエフ"
-        });
-        addGroup(1, "supermarket", "超市", new String[]{
-                "aeon", "イオン", "イオンリテール", "maxvalu", "マックスバリュ", "valor", "バロー", "業務スーパー", "gyomu super", "イトーヨーカドー",
-                "york benimaru", "ヨークベニマル", "ライフ", "life supermarket", "seiyu", "西友", "maruetsu", "マルエツ", "summit", "サミット",
-                "ok store", "オーケー", "yaoko", "ヤオコー", "apita", "アピタ", "piago", "ピアゴ", "coop", "コープ",
-                "生協", "成城石井", "seijo ishii", "mandai", "万代", "kansai super", "関西スーパー", "barrow"
-        });
-        addGroup(2, "restaurant_fast", "快餐", new String[]{
-                "mcdonald", "mcdonalds", "マクドナルド", "マック", "kfc", "ケンタッキー", "kentucky", "sukiya", "すき家", "matsuya",
-                "松屋", "yoshinoya", "吉野家", "mos burger", "モスバーガー", "burger king", "バーガーキング", "wendys", "ウェンディーズ", "first kitchen",
-                "フレッシュネスバーガー", "freshness burger", "subway", "サブウェイ", "なか卯", "nakau", "coco ichibanya", "ココイチ", "coco壱番屋", "てんや",
-                "天丼てんや", "hanamaru", "はなまるうどん", "丸亀製麺", "marugame", "リンガーハット", "ringer hut", "日高屋", "hidakaya"
-        });
-        addGroup(3, "restaurant_dining", "正餐", new String[]{
-                "restaurant", "レストラン", "料理", "食堂", "台湾料理", "吉香楼", "ラーメン", "らーめん", "餃子", "寿司",
-                "sushi", "焼肉", "yakiniku", "居酒屋", "izakaya", "カフェ", "cafe", "喫茶", "ガスト", "saizeriya",
-                "サイゼリヤ", "ジョナサン", "デニーズ", "ロイヤルホスト", "びっくりドンキー", "大戸屋", "ootoya", "やよい軒", "コメダ", "komeda",
-                "スターバックス", "starbucks", "ドトール", "doutor", "タリーズ", "tullys", "牛角", "gyukaku", "鳥貴族", "torikizoku",
-                "くら寿司", "スシロー", "はま寿司", "かっぱ寿司", "焼鳥", "中華", "定食", "ビストロ"
-        });
-        addGroup(4, "clothing_store", "服装店", new String[]{
-                "uniqlo", "ユニクロ", "gu", "ジーユー", "zara", "h&m", "hm", "しまむら", "shimamura", "無印良品",
-                "muji", "beams", "ビームス", "ships", "シップス", "united arrows", "ユナイテッドアローズ", "global work", "グローバルワーク", "wego",
-                "urban research", "アーバンリサーチ", "journal standard", "nano universe", "ナノユニバース", "abc mart", "abc-mart", "エービーシーマート", "nike", "ナイキ",
-                "adidas", "アディダス", "puma", "プーマ", "workman", "ワークマン", "right-on", "ライトオン", "aoki", "洋服の青山",
-                "青山", "honeys", "ハニーズ", "earth music", "gap", "old navy", "zoff", "jins", "眼鏡市場"
-        });
-        addGroup(5, "transport_train", "电车地铁", new String[]{
-                "jr", "jr東日本", "jr東海", "jr西日本", "jre", "suica", "pasmo", "manaca", "icoca", "toica",
-                "kitaca", "sugoca", "nimoca", "はやかけん", "地下鉄", "metro", "東京メトロ", "tokyo metro", "都営地下鉄", "名鉄",
-                "meitetsu", "近鉄", "kintetsu", "阪急", "hankyu", "阪神", "hanshin", "京急", "keikyu", "京王",
-                "keio", "小田急", "odakyu", "東急", "tokyu", "西武鉄道", "seibu", "東武鉄道", "tobu", "バス",
-                "bus", "交通", "鉄道", "駅", "乗車券", "定期券", "空港線", "交通局"
-        });
-        addGroup(6, "subscription", "订阅服务", new String[]{
-                "openai", "chatgpt", "openai chatgpt", "apple", "apple.com/bill", "app store", "icloud", "google", "google play", "youtube",
-                "youtube premium", "netflix", "spotify", "amazon prime", "prime video", "kindle", "audible", "disney", "disney+", "hulu",
-                "u-next", "unext", "abema", "dazn", "dropbox", "notion", "slack", "github", "microsoft", "office 365",
-                "adobe", "creative cloud", "canva", "zoom", "figma", "subscription", "subscr", "サブスク", "会員", "月額",
-                "年額", "premium", "pro plan", "cloud", "storage", "会员"
-        });
-        addGroup(7, "entertainment_movie", "电影娱乐", new String[]{
-                "movie", "映画", "映画館", "映画チケット", "cinema", "toho", "toho cinemas", "tohoシネマズ", "イオンシネマ", "aeon cinema",
-                "united cinemas", "ユナイテッドシネマ", "109シネマズ", "109 cinemas", "movix", "松竹", "ピカデリー", "シネマサンシャイン", "cinema sunshine", "t joy",
-                "t-joy", "ティジョイ", "os cinemas", "osシネマズ", "kino cinema", "キノシネマ", "チネチッタ", "cinetta", "ミッドランドスクエアシネマ", "伏見ミリオン座",
-                "センチュリーシネマ", "シネプレックス", "humax", "ヒューマックス", "シネマート", "テアトル", "映画鑑賞", "ムビチケ", "movieticket", "チケット"
-        });
+        try {
+            List<String[]> rows = parseCsv(readAssetText("builtin_rule_groups.csv"));
+            requireHeader(rows, "group_id", "group_name", "keywords");
+            for (int i = 1; i < rows.size(); i++) {
+                String groupId = cell(rows.get(i), 0).trim();
+                String groupName = cell(rows.get(i), 1).trim();
+                String keywords = cell(rows.get(i), 2).trim();
+                if (groupId.length() > 0 && groupName.length() > 0 && keywords.length() > 0) {
+                    addGroup(i - 1, groupId, groupName, keywords);
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
-    private void addGroup(int order, String groupId, String groupName, String[] bases) {
+    private void addGroup(int order, String groupId, String groupName, String keywords) {
         RuleGroup group = new RuleGroup(groupId, groupName, order, false);
-        group.keywords.addAll(expandKeywords(bases));
+        for (String keyword : keywords.split("\\|")) {
+            String value = keyword.trim();
+            if (value.length() > 0) {
+                group.keywords.add(value);
+            }
+        }
         builtInGroups.put(groupId, group);
     }
 
-    private Set<String> expandKeywords(String[] bases) {
-        LinkedHashSet<String> out = new LinkedHashSet<String>();
-        for (String base : bases) {
-            String value = base.trim();
-            if (value.length() == 0) {
-                continue;
-            }
-            String normalized = normalizeMerchant(value);
-            out.add(value);
-            out.add(normalized);
-            out.add(normalized.replace(" ", ""));
-            out.add(normalized.replace("-", ""));
-            out.add(value + "店");
-            out.add(value + " 支店");
-            out.add(value + " paypay");
-            out.add(value + " カード");
+    private String readAssetText(String name) throws IOException {
+        InputStream inputStream = context.getAssets().open(name);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int read;
+        while ((read = inputStream.read(buffer)) != -1) {
+            bytes.write(buffer, 0, read);
         }
-        return out;
+        inputStream.close();
+        return bytes.toString("UTF-8");
     }
-
     private static void requireHeader(List<String[]> rows, String... expected) throws Exception {
         if (rows.isEmpty()) {
             throw new Exception("CSV 为空");
@@ -587,7 +684,7 @@ public class CategoryRuleStore {
     }
 
     public static class RuleGroup {
-        public final String groupId;
+        public String groupId;
         public final String groupName;
         public final int order;
         public boolean imported;
