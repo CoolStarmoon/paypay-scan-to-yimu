@@ -3,6 +3,7 @@
 app/build/
 build/
 local.properties
+keystore.properties
 *.apk
 *.xls
 *.xlsx
