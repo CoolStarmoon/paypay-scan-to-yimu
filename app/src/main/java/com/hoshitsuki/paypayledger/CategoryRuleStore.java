@@ -580,14 +580,17 @@ public class CategoryRuleStore {
     }
 
     private void addGroup(int order, String groupId, String groupName, String keywords) {
-        RuleGroup group = new RuleGroup(groupId, groupName, order, false);
+        RuleGroup group = builtInGroups.get(groupId);
+        if (group == null) {
+            group = new RuleGroup(groupId, groupName, order, false);
+            builtInGroups.put(groupId, group);
+        }
         for (String keyword : keywords.split("\\|")) {
             String value = keyword.trim();
             if (value.length() > 0) {
                 group.keywords.add(value);
             }
         }
-        builtInGroups.put(groupId, group);
     }
 
     private String readAssetText(String name) throws IOException {

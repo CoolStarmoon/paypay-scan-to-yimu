@@ -587,12 +587,96 @@ public class MainActivity extends Activity {
 
     private void addParsedBills(List<BillItem> parsed) {
         for (BillItem item : parsed) {
-            if (seenKeys.add(item.key())) {
+            int duplicateIndex = findDuplicateBill(item);
+            if (duplicateIndex >= 0) {
+                mergeDuplicateBill(bills.get(duplicateIndex), item);
+            } else if (seenKeys.add(item.key())) {
                 bills.add(item);
             }
         }
         countText.setText(bills.size() + "\n已识别账单");
         renderBills();
+    }
+
+    private int findDuplicateBill(BillItem item) {
+        for (int i = 0; i < bills.size(); i++) {
+            BillItem existing = bills.get(i);
+            if (existing.amount == item.amount
+                    && existing.date.equals(item.date)
+                    && existing.time.equals(item.time)
+                    && isLikelySameMerchant(existing.merchant, item.merchant)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void mergeDuplicateBill(BillItem existing, BillItem incoming) {
+        if (merchantCompletenessScore(incoming.merchant) > merchantCompletenessScore(existing.merchant)) {
+            existing.merchant = incoming.merchant;
+            existing.applyCategory(rules.classify(existing.merchant));
+        }
+        seenKeys.add(existing.key());
+    }
+
+    private boolean isLikelySameMerchant(String left, String right) {
+        String a = dedupeMerchant(left);
+        String b = dedupeMerchant(right);
+        if (a.length() == 0 || b.length() == 0) {
+            return false;
+        }
+        if (a.equals(b) || a.contains(b) || b.contains(a)) {
+            return true;
+        }
+        if (sharedPrefixLength(a, b) >= 5) {
+            return true;
+        }
+        return similarity(a, b) >= 0.72f;
+    }
+
+    private String dedupeMerchant(String value) {
+        return CategoryRuleStore.normalizeMerchant(value)
+                .replaceAll("\\s+", "")
+                .replaceAll("[^a-z0-9\\p{IsHan}\\p{IsHiragana}\\p{IsKatakana}]+", "");
+    }
+
+    private int sharedPrefixLength(String a, String b) {
+        int max = Math.min(a.length(), b.length());
+        int count = 0;
+        while (count < max && a.charAt(count) == b.charAt(count)) {
+            count++;
+        }
+        return count;
+    }
+
+    private float similarity(String a, String b) {
+        int common = longestCommonSubsequence(a, b);
+        return (2.0f * common) / (a.length() + b.length());
+    }
+
+    private int longestCommonSubsequence(String a, String b) {
+        int[] previous = new int[b.length() + 1];
+        int[] current = new int[b.length() + 1];
+        for (int i = 1; i <= a.length(); i++) {
+            for (int j = 1; j <= b.length(); j++) {
+                if (a.charAt(i - 1) == b.charAt(j - 1)) {
+                    current[j] = previous[j - 1] + 1;
+                } else {
+                    current[j] = Math.max(previous[j], current[j - 1]);
+                }
+            }
+            int[] tmp = previous;
+            previous = current;
+            current = tmp;
+            for (int j = 0; j < current.length; j++) {
+                current[j] = 0;
+            }
+        }
+        return previous[b.length()];
+    }
+
+    private int merchantCompletenessScore(String merchant) {
+        return dedupeMerchant(merchant).length();
     }
 
     private void finishProcessing() {
