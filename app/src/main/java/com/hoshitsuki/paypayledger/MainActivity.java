@@ -86,6 +86,7 @@ public class MainActivity extends Activity {
     private TextView countText;
     private ProgressBar progressBar;
     private Button importButton;
+    private Button yimuExportButton;
     private Button exportButton;
     private int processedCount = 0;
     private byte[] pendingCustomWorkbook;
@@ -191,10 +192,23 @@ public class MainActivity extends Activity {
         statusText.setPadding(0, dp(12), 0, dp(16));
         root.addView(statusText);
 
+        yimuExportButton = actionButton("导出至一木记账", sand, ink, 16);
+        yimuExportButton.setEnabled(false);
+        root.addView(yimuExportButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
+        yimuExportButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                exportTempWorkbookToYimu();
+            }
+        });
+
         exportButton = actionButton("自定义导出表格", sand, ink, 16);
         exportButton.setEnabled(false);
-        root.addView(exportButton, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
+        LinearLayout.LayoutParams exportLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+        exportLp.setMargins(0, dp(10), 0, 0);
+        root.addView(exportButton, exportLp);
         exportButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -541,6 +555,7 @@ public class MainActivity extends Activity {
         seenKeys.clear();
         processedCount = 0;
         listArea.removeAllViews();
+        yimuExportButton.setEnabled(false);
         exportButton.setEnabled(false);
         importButton.setEnabled(false);
         statusText.setText("正在识别 0/" + pendingUris.size());
@@ -693,6 +708,7 @@ public class MainActivity extends Activity {
             statusText.setText("没有识别到可导入的账单，请确认截图是 PayPay 交易履历列表。");
             return;
         }
+        yimuExportButton.setEnabled(true);
         exportButton.setEnabled(true);
         statusText.setText("识别完成，正在生成一木记账导入表格。");
         prepareTempExportAndPrompt();
@@ -1210,6 +1226,22 @@ public class MainActivity extends Activity {
         outputStream.write(XlsExporter.create(bills));
         outputStream.close();
         return output;
+    }
+
+    private void exportTempWorkbookToYimu() {
+        if (bills.isEmpty()) {
+            Toast.makeText(this, "没有可导出的账单", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            File tempFile = writeTempWorkbook();
+            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", tempFile);
+            statusText.setText("表格已生成，可以直接分享至一木记账 App 快速导入。");
+            shareWorkbook(uri);
+        } catch (Exception e) {
+            statusText.setText("生成表格失败：" + e.getMessage());
+            Toast.makeText(this, "生成表格失败", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void showTempShareDialog(final Uri uri) {
